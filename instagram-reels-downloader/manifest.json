@@ -1,24 +1,28 @@
 {
   "manifest_version": 3,
   "name": "Instagram Reels Downloader",
-  "version": "1.0",
-  "description": "Download all reels from any Instagram profile in a single click as a .zip file",
+  "version": "2.0",
+  "description": "Download reels from Instagram profiles with individual download options - Fast & Simple",
   "permissions": [
     "activeTab",
     "scripting",
-    "downloads"
+    "downloads",
+    "sidePanel"
   ],
   "host_permissions": [
     "https://www.instagram.com/*",
     "https://instagram.com/*"
   ],
   "action": {
-    "default_popup": "popup.html",
+    "default_title": "Open Reels Downloader",
     "default_icon": {
       "16": "icons/icon16.png",
       "48": "icons/icon48.png",
       "128": "icons/icon128.png"
     }
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
   },
   "icons": {
     "16": "icons/icon16.png",
@@ -34,12 +38,6 @@
       "matches": ["https://www.instagram.com/*", "https://instagram.com/*"],
       "js": ["content.js"],
       "run_at": "document_end"
-    }
-  ],
-  "web_accessible_resources": [
-    {
-      "resources": ["lib/*.js"],
-      "matches": ["https://www.instagram.com/*", "https://instagram.com/*"]
     }
   ]
 }
