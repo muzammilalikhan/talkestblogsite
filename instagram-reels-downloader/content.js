@@ -1,38 +1,48 @@
 // Instagram Reels Downloader - Content Script
-let isScraping = false;
+let isScanning = false;
 let scrapedReels = [];
 let hasMoreToLoad = true;
 
-// Listen for messages from popup
+// Listen for messages from popup/sidepanel
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.action === 'startScraping') {
-    if (isScraping) {
-      sendResponse({ status: 'already_scraping' });
+  if (message.action === 'scanReels') {
+    if (isScanning) {
+      sendResponse({ status: 'already_scanning' });
       return true;
     }
     
-    isScraping = true;
+    isScanning = true;
     scrapedReels = [];
     hasMoreToLoad = true;
     
-    // Check if we're on a profile page with reels
-    if (!window.location.href.includes('/reels') && !window.location.href.includes('instagram.com/')) {
+    // Check if we're on a profile page
+    if (!window.location.href.includes('instagram.com/')) {
       chrome.runtime.sendMessage({ type: 'error', error: 'Please navigate to an Instagram profile page' });
       sendResponse({ status: 'invalid_page' });
       return true;
     }
     
-    sendResponse({ status: 'started' });
+    sendResponse({ status: 'scanning' });
     
-    // Start the scraping process
-    startScraping();
+    // Start the scanning process
+    startScanning();
+  }
+  else if (message.action === 'downloadSingle') {
+    downloadSingleReel(message.url, message.reelId);
+    sendResponse({ status: 'downloading' });
+  }
+  else if (message.action === 'downloadAll') {
+    downloadAllReels(message.reels);
+    sendResponse({ status: 'downloading' });
   }
   
   return true;
 });
 
-async function startScraping() {
+async function startScanning() {
   try {
+    chrome.runtime.sendMessage({ type: 'scan_started' });
+    
     // Navigate to reels tab if not already there
     const reelsTab = document.querySelector('a[href*="/reels"]');
     if (reelsTab && !window.location.href.includes('/reels')) {
@@ -43,21 +53,17 @@ async function startScraping() {
     // Scroll and collect reels
     await scrollAndCollectReels();
     
-    // Download all collected reels
-    if (scrapedReels.length > 0) {
-      await downloadAllReels();
-    } else {
-      chrome.runtime.sendMessage({ 
-        type: 'error', 
-        error: 'No reels found. Make sure the profile has public reels.' 
-      });
-    }
+    // Send complete results
+    chrome.runtime.sendMessage({ 
+      type: 'scan_complete', 
+      reels: scrapedReels.map(url => ({ url }))
+    });
     
-    isScraping = false;
+    isScanning = false;
   } catch (error) {
-    console.error('Scraping error:', error);
+    console.error('Scanning error:', error);
     chrome.runtime.sendMessage({ type: 'error', error: error.message });
-    isScraping = false;
+    isScanning = false;
   }
 }
 
@@ -70,7 +76,7 @@ async function scrollAndCollectReels() {
     collectReelLinks();
     
     chrome.runtime.sendMessage({ 
-      type: 'scraping_progress', 
+      type: 'scan_progress', 
       count: scrapedReels.length 
     });
     
@@ -92,11 +98,6 @@ async function scrollAndCollectReels() {
       hasMoreToLoad = false;
     }
   }
-  
-  chrome.runtime.sendMessage({ 
-    type: 'scraping_complete', 
-    totalReels: scrapedReels.length 
-  });
 }
 
 function collectReelLinks() {
@@ -111,39 +112,80 @@ function collectReelLinks() {
   });
 }
 
-async function downloadAllReels() {
+async function downloadSingleReel(reelUrl, reelId) {
   try {
-    // Send reel URLs to background script for downloading
-    chrome.runtime.sendMessage({ 
-      type: 'download_reels', 
-      reels: scrapedReels 
-    });
+    // Extract video URL from the reel page
+    const videoUrl = await extractVideoUrl(reelUrl);
+    
+    if (videoUrl) {
+      // Download the video
+      const blob = await downloadVideo(videoUrl);
+      
+      // Create download URL
+      const downloadUrl = URL.createObjectURL(blob);
+      
+      // Trigger download
+      await chrome.runtime.sendMessage({ 
+        type: 'download_file', 
+        url: downloadUrl, 
+        filename: `reel_${reelId}.mp4`,
+        isBlob: true
+      });
+      
+      chrome.runtime.sendMessage({ 
+        type: 'single_download_complete', 
+        reelId: reelId 
+      });
+    } else {
+      chrome.runtime.sendMessage({ 
+        type: 'error', 
+        error: 'Could not extract video URL' 
+      });
+    }
   } catch (error) {
-    console.error('Download error:', error);
+    console.error('Single download error:', error);
     chrome.runtime.sendMessage({ type: 'error', error: error.message });
   }
 }
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+async function downloadAllReels(reelUrls) {
+  try {
+    // Send reel URLs to background script for downloading
+    chrome.runtime.sendMessage({ 
+      type: 'download_all_reels', 
+      reels: reelUrls 
+    });
+  } catch (error) {
+    console.error('Download all error:', error);
+    chrome.runtime.sendMessage({ type: 'error', error: error.message });
+  }
 }
 
-// Helper function to extract video URL from a reel page
 async function extractVideoUrl(reelUrl) {
   try {
     const response = await fetch(reelUrl);
     const html = await response.text();
     
     // Extract video URL from the page HTML
-    const videoMatch = html.match(/"video_url":"([^"]+)"/);
-    if (videoMatch && videoMatch[1]) {
-      return videoMatch[1].replace(/\\u0026/g, '&');
-    }
+    const patterns = [
+      /"video_url":"([^"]+)"/,
+      /"src":"([^"]+\.mp4[^"]*)"/,
+      /video_url\\":\\"([^"]+)/,
+      /"playUrl":"([^"]+)"/
+    ];
     
-    // Try alternative patterns
-    const altMatch = html.match(/"src":"([^"]+\.mp4[^"]*)"/);
-    if (altMatch && altMatch[1]) {
-      return altMatch[1];
+    for (const pattern of patterns) {
+      const match = html.match(pattern);
+      if (match && match[1]) {
+        let videoUrl = match[1]
+          .replace(/\\u0026/g, '&')
+          .replace(/\\"/g, '"')
+          .replace(/\\\\/g, '\\');
+        
+        if (videoUrl.startsWith('http')) {
+          return videoUrl;
+        }
+      }
     }
     
     return null;
@@ -151,4 +193,19 @@ async function extractVideoUrl(reelUrl) {
     console.error('Error extracting video URL:', error);
     return null;
   }
+}
+
+async function downloadVideo(videoUrl) {
+  try {
+    const response = await fetch(videoUrl);
+    const blob = await response.blob();
+    return blob;
+  } catch (error) {
+    console.error('Error downloading video:', error);
+    throw error;
+  }
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }

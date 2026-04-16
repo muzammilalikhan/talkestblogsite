@@ -1,21 +1,45 @@
 // Background Service Worker for Instagram Reels Downloader
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.type === 'download_reels') {
+  if (message.type === 'download_all_reels') {
     handleReelsDownload(message.reels);
+    sendResponse({ status: 'started' });
+  }
+  else if (message.type === 'download_file') {
+    handleFileDownload(message.url, message.filename, message.isBlob);
+    sendResponse({ status: 'started' });
   }
   return true;
 });
+
+async function handleFileDownload(url, filename, isBlob) {
+  try {
+    await chrome.downloads.download({
+      url: url,
+      filename: filename,
+      saveAs: false
+    });
+    
+    if (isBlob) {
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+  } catch (error) {
+    console.error('File download error:', error);
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (tabs[0]) {
+        chrome.tabs.sendMessage(tabs[0].id, { type: 'error', error: error.message });
+      }
+    });
+  }
+}
 
 async function handleReelsDownload(reelUrls) {
   try {
     const videoBlobs = [];
     
-    // Download each reel
     for (let i = 0; i < reelUrls.length; i++) {
       const reelUrl = reelUrls[i];
       
-      // Update progress
       chrome.runtime.sendMessage({ 
         type: 'download_progress', 
         current: i + 1, 
@@ -23,14 +47,10 @@ async function handleReelsDownload(reelUrls) {
       });
       
       try {
-        // Extract video URL from the reel page
         const videoUrl = await extractVideoUrl(reelUrl);
         
         if (videoUrl) {
-          // Download the video
           const blob = await downloadVideo(videoUrl);
-          
-          // Extract reel ID for filename
           const reelId = extractReelId(reelUrl);
           
           videoBlobs.push({
@@ -42,15 +62,12 @@ async function handleReelsDownload(reelUrls) {
         console.error(`Failed to download reel ${i + 1}:`, error);
       }
       
-      // Add delay to avoid rate limiting
       await sleep(1000);
     }
     
     if (videoBlobs.length > 0) {
-      // Create ZIP file
       await createAndDownloadZip(videoBlobs);
-      
-      chrome.runtime.sendMessage({ type: 'download_started' });
+      chrome.runtime.sendMessage({ type: 'download_complete' });
     } else {
       chrome.runtime.sendMessage({ 
         type: 'error', 
@@ -65,8 +82,6 @@ async function handleReelsDownload(reelUrls) {
 
 async function extractVideoUrl(reelUrl) {
   try {
-    // Note: This is a simplified approach
-    // In production, you might need to handle Instagram's anti-bot measures
     const response = await fetch(reelUrl, {
       method: 'GET',
       headers: {
@@ -76,11 +91,10 @@ async function extractVideoUrl(reelUrl) {
     
     const html = await response.text();
     
-    // Try multiple patterns to find video URL
     const patterns = [
       /"video_url":"([^"]+)"/,
       /"src":"([^"]+\.mp4[^"]*)"/,
-      /video_url\\":\\"([^"]+)"/,
+      /video_url\\":\\"([^"]+)/,
       /"playUrl":"([^"]+)"/
     ];
     
@@ -92,7 +106,6 @@ async function extractVideoUrl(reelUrl) {
           .replace(/\\"/g, '"')
           .replace(/\\\\/g, '\\');
         
-        // Validate URL
         if (videoUrl.startsWith('http')) {
           return videoUrl;
         }
@@ -118,44 +131,51 @@ async function downloadVideo(videoUrl) {
 }
 
 function extractReelId(reelUrl) {
-  // Extract reel ID from URL
   const match = reelUrl.match(/\/reel\/([^\/\?]+)/);
   if (match && match[1]) {
-    return match[1].substring(0, 15); // Use first 15 chars to keep filename reasonable
+    return match[1].substring(0, 15);
   }
   return Date.now().toString();
 }
 
 async function createAndDownloadZip(videoBlobs) {
   try {
+    const jszipUrl = chrome.runtime.getURL('lib/jszip.min.js');
+    const response = await fetch(jszipUrl);
+    const jszipCode = await response.text();
+    eval(jszipCode);
+    
     const zip = new JSZip();
     const folderName = `instagram_reels_${Date.now()}`;
     const reelFolder = zip.folder(folderName);
     
-    // Add each video to the ZIP
     for (const video of videoBlobs) {
       reelFolder.file(video.name, video.blob);
     }
     
-    // Generate ZIP file
     const content = await zip.generateAsync({ type: 'blob' });
-    
-    // Create download URL
     const url = URL.createObjectURL(content);
     
-    // Download the ZIP file
     await chrome.downloads.download({
       url: url,
       filename: `${folderName}.zip`,
       saveAs: false
     });
     
-    // Clean up after delay
     setTimeout(() => URL.revokeObjectURL(url), 1000);
     
   } catch (error) {
     console.error('Error creating ZIP:', error);
-    throw new Error('Failed to create ZIP file: ' + error.message);
+    for (const video of videoBlobs) {
+      const url = URL.createObjectURL(video.blob);
+      await chrome.downloads.download({
+        url: url,
+        filename: video.name,
+        saveAs: false
+      });
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      await sleep(500);
+    }
   }
 }
 
